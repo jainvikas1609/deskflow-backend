@@ -6,25 +6,33 @@ const pool   = require('../config/db');
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password)
-      return res.status(400).json({ error: 'Email and password required' });
-    const { rows } = await pool.query(
-      'SELECT * FROM users WHERE email=$1 AND active=true', [email]);
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    const { rows } = await pool.query('SELECT * FROM users WHERE email=$1 AND active=true', [email]);
     const user = rows[0];
     if (!user) return res.status(401).json({ error: 'Invalid credentials' });
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role, name: user.name },
-      process.env.JWT_SECRET, { expiresIn: '24h' });
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+      { id:user.id, email:user.email, role:user.role, name:user.name },
+      process.env.JWT_SECRET, { expiresIn:'24h' });
+    // Check for pending CSAT and breach alerts
+    const { rows: csat } = await pool.query(
+      `SELECT cs.id, t.ticket_number, t.subject FROM csat_surveys cs
+       JOIN tickets t ON t.id=cs.ticket_id
+       WHERE cs.customer_id=$1 AND cs.responded=false`, [user.id]);
+    const { rows: breaches } = await pool.query(
+      `SELECT ba.id, t.ticket_number, t.subject, ba.alert_type, ba.stage
+       FROM sla_breach_alerts ba JOIN tickets t ON t.id=ba.ticket_id
+       WHERE ba.dismissed_by IS NULL AND t.status NOT IN ('Resolved','Closed')
+       ORDER BY ba.created_at DESC LIMIT 20`);
+    res.json({ token, user:{ id:user.id, name:user.name, email:user.email, role:user.role },
+      pendingCsat: csat, breachAlerts: breaches });
   } catch (e) {
     console.error('LOGIN ERROR:', e.message);
     res.status(500).json({ error: 'Server error: ' + e.message });
   }
 });
 
-// Change own password
 router.post('/change-password', require('../middleware/auth').authenticate, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
